@@ -1,0 +1,206 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function admin() { return signedIn() && request.auth.token.admin == true; }
+    function owner(uid) { return signedIn() && request.auth.uid == uid; }
+    function validId(id) { return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[A-Za-z0-9_-]+$'); }
+    function phoneVerified() { return signedIn() && request.auth.token.phone_number != null; }
+    function acceptedBooking(bookingId) {
+      return exists(/databases/$(database)/documents/bookings/$(bookingId)) &&
+        get(/databases/$(database)/documents/bookings/$(bookingId)).data.status in ['confirmed','completion_pending','completed'];
+    }
+    function validProvider(d) {
+      return d.ownerId is string && d.businessName is string && d.businessName.size() >= 2 && d.businessName.size() <= 80 &&
+        d.tradeCategory in ['plumbing','electrical','carpentry','cleaning','hvac','appliance','painting','zellige','metalwork','gardening','moving','smart_home'] &&
+        d.serviceKind in ['artisan','home_service'] && d.bio is string && d.bio.size() >= 5 && d.bio.size() <= 500 &&
+        d.city is string && d.city.size() >= 2 && d.city.size() <= 80 && d.country is string && d.country.size() >= 2 && d.country.size() <= 80 &&
+        (!('countryCode' in d) || (d.countryCode is string && d.countryCode.matches('^[A-Z]{2}$')) ) &&
+        d.continent in ['africa','europe','asia','north_america','south_america','oceania'] &&
+        d.latitude is number && d.latitude >= -90 && d.latitude <= 90 &&
+        d.longitude is number && d.longitude >= -180 && d.longitude <= 180 &&
+        d.hourlyRate is number && d.hourlyRate >= 1 && d.hourlyRate <= 10000 &&
+        d.currency is string && d.currency.size() >= 3 && d.currency.size() <= 5 &&
+        d.languages is list && d.languages.size() >= 1 && d.languages.size() <= 4 &&
+        d.rating is number && d.rating >= 0 && d.rating <= 5 &&
+        d.reviewCount is int && d.reviewCount >= 0 &&
+        d.yearsExperience is int && d.yearsExperience >= 0 && d.yearsExperience <= 80 &&
+        d.verificationTier in ['unverified','id_verified'] && d.whatsappEnabled is bool &&
+        d.availableToday is bool && d.published is bool &&
+        d.createdAt is timestamp && d.updatedAt is timestamp;
+    }
+    function validBooking(d) {
+      return d.clientId is string && d.clientName is string && d.clientName.size() <= 80 &&
+        d.providerId is string && d.providerName is string && d.providerOwnerId is string &&
+        d.tradeCategory is string && d.serviceTitle is string && d.serviceTitle.size() >= 2 && d.serviceTitle.size() <= 120 &&
+        d.scheduledDate is string && d.scheduledAt is timestamp &&
+        d.city is string && d.city.size() >= 2 && d.city.size() <= 80 &&
+        d.estimatedHours is number && d.estimatedHours >= 1 && d.estimatedHours <= 24 &&
+        d.estimatedPrice is number && d.estimatedPrice >= 0 && d.estimatedPrice <= 100000 &&
+        d.currency is string && d.currency.size() >= 3 && d.currency.size() <= 5 &&
+        d.status in ['pending','confirmed','completion_pending','completed','cancelled'] &&
+        d.createdAt is timestamp && d.updatedAt is timestamp;
+    }
+
+    match /users/{uid} {
+      allow get: if owner(uid);
+      allow list: if false;
+      allow create: if owner(uid) && request.resource.data.userId == uid &&
+        request.resource.data.keys().hasOnly(['userId','displayName','preferredLanguage','preferredCity','preferredCountry','createdAt','updatedAt']) &&
+        request.resource.data.displayName is string &&
+        request.resource.data.preferredLanguage in ['ar','en','fr','es'];
+      allow update: if owner(uid) &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName','preferredLanguage','preferredCity','preferredCountry','updatedAt']);
+      allow delete: if owner(uid);
+
+      match /private/{docId} {
+        allow get: if owner(uid);
+        allow list: if false;
+        allow create: if owner(uid) && request.resource.data.userId == uid &&
+          request.resource.data.keys().hasOnly(['userId','email','phone','homeAddress','whatsappPhone','shareWhatsApp','createdAt','updatedAt']);
+        allow update: if owner(uid) && request.resource.data.userId == resource.data.userId &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['email','phone','homeAddress','whatsappPhone','shareWhatsApp','updatedAt']);
+        allow delete: if owner(uid);
+      }
+      match /favorites/{providerId} {
+        allow get,list: if owner(uid);
+        allow create: if owner(uid) && request.resource.data.userId == uid &&
+          request.resource.data.providerId == providerId &&
+          request.resource.data.keys().hasOnly(['userId','providerId','providerName','tradeCategory','city','createdAt']);
+        allow delete: if owner(uid);
+        allow update: if false;
+      }
+    }
+
+    match /providers/{providerId} {
+      allow get: if signedIn() && (owner(resource.data.ownerId) || resource.data.published == true || admin());
+      allow list: if signedIn() && (resource.data.published == true || admin());
+      allow create: if phoneVerified() && providerId == request.auth.uid &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.published == false &&
+        request.resource.data.verificationTier == 'unverified' &&
+        validProvider(request.resource.data) &&
+        request.resource.data.keys().hasOnly(['ownerId','businessName','tradeCategory','serviceKind','bio','city','country','countryCode','continent','latitude','longitude','hourlyRate','currency','languages','rating','reviewCount','yearsExperience','verificationTier','whatsappEnabled','availableToday','published','createdAt','updatedAt']);
+      allow update: if owner(resource.data.ownerId) &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        validProvider(request.resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['businessName','tradeCategory','serviceKind','bio','city','country','countryCode','continent','latitude','longitude','hourlyRate','currency','languages','yearsExperience','whatsappEnabled','availableToday','updatedAt']);
+      allow update: if admin() &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['verificationTier','published','updatedAt']) &&
+        (!request.resource.data.published ||
+          (request.resource.data.verificationTier == 'id_verified' &&
+           exists(/databases/$(database)/documents/verificationRequests/$(providerId)) &&
+           get(/databases/$(database)/documents/verificationRequests/$(providerId)).data.status == 'approved'));
+      allow delete: if owner(resource.data.ownerId) || admin();
+
+      match /reviews/{reviewId} {
+        allow get,list: if signedIn() && get(/databases/$(database)/documents/providers/$(providerId)).data.published == true;
+        allow create: if signedIn() && reviewId == request.resource.data.bookingId &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.providerId == providerId &&
+          request.resource.data.published == true &&
+          exists(/databases/$(database)/documents/bookings/$(reviewId)) &&
+          get(/databases/$(database)/documents/bookings/$(reviewId)).data.clientId == request.auth.uid &&
+          get(/databases/$(database)/documents/bookings/$(reviewId)).data.providerId == providerId &&
+          get(/databases/$(database)/documents/bookings/$(reviewId)).data.status == 'completed' &&
+          request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5 &&
+          request.resource.data.comment is string && request.resource.data.comment.size() >= 2 && request.resource.data.comment.size() <= 400 &&
+          request.resource.data.keys().hasOnly(['providerId','bookingId','authorId','authorName','rating','comment','language','published','createdAt','updatedAt']);
+        allow update: if signedIn() && resource.data.authorId == request.auth.uid &&
+          request.resource.data.authorId == resource.data.authorId &&
+          request.resource.data.bookingId == resource.data.bookingId &&
+          request.resource.data.providerId == resource.data.providerId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating','comment','language','updatedAt']);
+        allow delete: if signedIn() && resource.data.authorId == request.auth.uid;
+      }
+    }
+
+    match /bookings/{bookingId} {
+      allow get,list: if signedIn() && (resource.data.clientId == request.auth.uid || resource.data.providerOwnerId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.clientId == request.auth.uid &&
+        request.resource.data.status == 'pending' && request.resource.data.scheduledAt > request.time &&
+        validBooking(request.resource.data) &&
+        exists(/databases/$(database)/documents/providers/$(request.resource.data.providerId)) &&
+        get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.published == true &&
+        get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.ownerId == request.resource.data.providerOwnerId &&
+        get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.currency == request.resource.data.currency &&
+        request.resource.data.estimatedPrice ==
+          get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.hourlyRate * request.resource.data.estimatedHours &&
+        request.resource.data.keys().hasOnly(['clientId','clientName','providerId','providerName','providerOwnerId','tradeCategory','serviceTitle','scheduledDate','scheduledAt','city','notes','estimatedHours','estimatedPrice','currency','status','createdAt','updatedAt']);
+      allow update: if signedIn() && validBooking(request.resource.data) &&
+        resource.data.status != 'completed' && resource.data.status != 'cancelled' &&
+        request.resource.data.clientId == resource.data.clientId &&
+        request.resource.data.providerId == resource.data.providerId &&
+        request.resource.data.providerOwnerId == resource.data.providerOwnerId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        (
+          (resource.data.clientId == request.auth.uid &&
+            ((resource.data.status == 'pending' && request.resource.data.status in ['pending','cancelled'] &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scheduledDate','scheduledAt','notes','status','updatedAt'])) ||
+             (resource.data.status == 'completion_pending' && request.resource.data.status == 'completed' &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt']))) ||
+          (resource.data.providerOwnerId == request.auth.uid &&
+            ((resource.data.status == 'pending' && request.resource.data.status in ['confirmed','cancelled']) ||
+             (resource.data.status == 'confirmed' && request.resource.data.status in ['completion_pending','cancelled'])) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt']))
+        );
+      allow delete: if signedIn() && resource.data.clientId == request.auth.uid && resource.data.status == 'pending';
+    }
+
+    // Contact details are separate from the booking record and hidden from the provider until acceptance.
+    match /bookingContacts/{bookingId} {
+      function booking() { return get(/databases/$(database)/documents/bookings/$(bookingId)).data; }
+      allow get: if signedIn() && exists(/databases/$(database)/documents/bookings/$(bookingId)) &&
+        (booking().clientId == request.auth.uid ||
+         (booking().providerOwnerId == request.auth.uid && booking().status in ['confirmed','completion_pending','completed']));
+      allow list: if false;
+      allow create: if signedIn() && exists(/databases/$(database)/documents/bookings/$(bookingId)) &&
+        booking().clientId == request.auth.uid &&
+        request.resource.data.bookingId == bookingId &&
+        request.resource.data.clientId == request.auth.uid &&
+        request.resource.data.providerOwnerId == booking().providerOwnerId &&
+        request.resource.data.keys().hasOnly(['bookingId','clientId','providerOwnerId','clientWhatsAppPhone','serviceAddress','createdAt','updatedAt']) &&
+        (!('clientWhatsAppPhone' in request.resource.data) || request.resource.data.clientWhatsAppPhone.matches('^\\+[1-9][0-9]{7,14}$')) &&
+        (!('serviceAddress' in request.resource.data) || (request.resource.data.serviceAddress is string && request.resource.data.serviceAddress.size() <= 200));
+      allow update: if signedIn() && exists(/databases/$(database)/documents/bookings/$(bookingId)) &&
+        booking().providerOwnerId == request.auth.uid &&
+        booking().status in ['confirmed','completion_pending','completed'] &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['providerWhatsAppPhone','updatedAt']) &&
+        request.resource.data.providerWhatsAppPhone is string && request.resource.data.providerWhatsAppPhone.matches('^\\+[1-9][0-9]{7,14}$');
+      allow delete: if false;
+    }
+
+    match /verificationRequests/{uid} {
+      allow get: if owner(uid) || admin();
+      allow list: if admin();
+      allow create: if phoneVerified() && owner(uid) &&
+        request.resource.data.userId == uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.storagePath is string &&
+        request.resource.data.storagePath.matches('^identity-verification/' + uid + '/.*$') &&
+        request.resource.data.keys().hasOnly(['userId','storagePath','status','submittedAt','updatedAt']);
+      allow update: if (admin() &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.storagePath == resource.data.storagePath &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','reviewedBy','reviewedAt','updatedAt']) &&
+        request.resource.data.status in ['approved','rejected']) ||
+        (owner(uid) && resource.data.status == 'rejected' &&
+        request.resource.data.userId == uid && request.resource.data.status == 'pending' &&
+        request.resource.data.storagePath is string &&
+        request.resource.data.storagePath.matches('^identity-verification/' + uid + '/.*$') &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['storagePath','status','submittedAt','updatedAt']));
+      allow delete: if admin();
+    }
+
+    match /commissionLedger/{bookingId} {
+      allow get,list: if admin() || (signedIn() && resource.data.providerOwnerId == request.auth.uid);
+      allow create,update,delete: if false;
+    }
+  }
+}
